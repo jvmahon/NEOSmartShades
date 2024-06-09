@@ -2,6 +2,7 @@
 var net = require('net');
 const pkg = require("./package.json");
 const queue = require("queue");
+const fs = require('fs');
 
 var sendQueue = queue({autostart:true, concurrency:1})
 		
@@ -22,7 +23,7 @@ module.exports = function (homebridge) {
     Characteristic = homebridge.hap.Characteristic;
     UUIDGen = homebridge.hap.uuid;
 
-    homebridge.registerPlatform("homebridge-NEOShadePlatform", "NEOShades", NEOShadePlatform, true);
+    homebridge.registerPlatform("homebridge-NeoSmartBlinds", "NEOShades", NEOShadePlatform, true);
 }
 
 function NEOShadePlatform(log, config, api) {
@@ -48,7 +49,7 @@ NEOShadePlatform.prototype = {
 			try  {
 				var accessory = new NEOShadeAccessory(that.log, that.config, currentShade);
 			} catch(error) {
-				console.log( "** Error ** creating new NEO Smart Shade in file index.js."); 
+				console.log( "** Error ** creating new NEO Smart Blinds in file index.js."); 
 				throw error
 			}	
 
@@ -96,6 +97,81 @@ var setupShadeServices = function (that, services)
 			sendQueue.push(sendfunction)
 		}
 	
+	// Function to ensure that the file or folder exists
+	function ensureFileOrFolderExists(filePath) {
+		const folderPath = filePath.substring(0, filePath.lastIndexOf('/'));
+
+		if (!fs.existsSync(folderPath)) {
+			fs.mkdirSync(folderPath, { recursive: true });
+		}
+
+		if (!fs.existsSync(filePath)) {
+			fs.writeFileSync(filePath, '', 'utf8');
+		}
+	}
+
+	// Function to load state for a specific ID from file
+	function loadStateForId(filePath, id) {
+		try {
+			const data = fs.readFileSync(filePath, 'utf8');
+			const lines = data.split('\n');
+
+			for (const line of lines) {
+				const [fileId, value] = line.split(',').map(item => item.trim());
+				if (fileId === id) {
+					return parseInt(value);
+				}
+			}
+
+			// If ID not found, return null or any default value as needed
+			return 50;
+		} catch (err) {
+			if(err.code == "ENOENT"){
+				console.log("No State file exists.")
+				return 50;
+			}
+			else{
+				console.error('Error loading state for ID from file:', err);
+				return 50;
+			}
+			
+		}
+	}
+
+	
+	function saveStateForId(filePath, id, value) {
+		try {
+			// Ensure that the file or folder exists
+			ensureFileOrFolderExists(filePath);
+	
+			// Read existing file content
+			let data = fs.readFileSync(filePath, 'utf8');
+			const lines = data.split('\n');
+	
+			// Update value for the specified ID or add it if not present
+			let found = false;
+			for (let i = 0; i < lines.length; i++) {
+				const [fileId, _] = lines[i].split(',').map(item => item.trim());
+				if (fileId === id) {
+					lines[i] = `${id}, ${value}`;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				lines.push(`${id}, ${value}`);
+			}
+	
+			// Save updated content back to the file
+			data = lines.join('\n');
+			fs.writeFileSync(filePath, data, 'utf8');
+		} catch (err) {
+			console.error('Error saving state for ID to file:', err);
+		}
+	}
+
+	let filePath = 'files/states.txt'
+
 	let Characteristic 	= globals.api.hap.Characteristic;
 	let Service 		= globals.api.hap.Service;
 	
@@ -111,38 +187,62 @@ var setupShadeServices = function (that, services)
 	
 	var currentPosition = thisService.getCharacteristic(Characteristic.CurrentPosition)
 	var targetPosition = thisService.getCharacteristic(Characteristic.TargetPosition)
+	var positionState = thisService.getCharacteristic(Characteristic.PositionState)
 	
-	currentPosition.value = 50;
-	targetPosition.value = 50;
+
+	const currentState = loadStateForId(filePath, that.config.code);
+	console.log(`Current state for ID ${that.config.code}:`, currentState);
+
+	currentPosition.value = currentState //50;
+	targetPosition.value =  currentState//50;
+	positionState.value = 2;
 	
 	targetPosition
 		.on('set', function(value, callback, context) {
 			switch(value) {
 				case 0: // Close the Shade!
 					send(that.config.code + "-dn!" + (that.config.motorType ? that.config.motorType : "bf") )
+					positionState.updateValue(0);
 					setTimeout( function(){
-						targetPosition.updateValue(50);
-						currentPosition.updateValue(50)
+						targetPosition.updateValue(0);
+						currentPosition.updateValue(0)
 					}, 25000);
+					positionState.updateValue(2);
+					saveStateForId(filePath, that.config.code, value);
+					console.log(`Updated state for ID ${that.config.code} with value ${value}.`);
 					break;
 				case 24:
 				case 25:
 				case 26: // Move Shade to Favorite position!
 					send(that.config.code + "-gp" + (that.config.motorType ? that.config.motorType : "bf"))
+
+					if(thisService.getCharacteristic(Characteristic.CurrentPosition) > 25){
+						positionState.updateValue(0);
+					}
+					else{
+						positionState.updateValue(1);
+					}
+
 					setTimeout( function(){
-						targetPosition.updateValue(50);
-						currentPosition.updateValue(50)
+						targetPosition.updateValue(25);
+						currentPosition.updateValue(25)
 					}, 25000);
+					positionState.updateValue(2);
+					saveStateForId(filePath, that.config.code, value);
+					console.log(`Updated state for ID ${that.config.code} with value ${value}.`);
 					break					
 					
 				case 100: // Open the shade
 					send(that.config.code + "-up!" + (that.config.motorType ? that.config.motorType : "bf"))
-
+					positionState.updateValue(1);
 					// NEO controller doesn't detect actual position, reset shade after 20 seconds to show the user the shade is at half-position - i.e., neither up or down!
 					setTimeout( function(){
-						targetPosition.updateValue(50);
-						currentPosition.updateValue(50)
+						targetPosition.updateValue(100);
+						currentPosition.updateValue(100)
 					}, 25000);
+					positionState.updateValue(2);
+					saveStateForId(filePath, that.config.code, value);
+					console.log(`Updated state for ID ${that.config.code} with value ${value}.`);
 					break;
 				default:
 					// Do nothing if any ohter value is selected!
